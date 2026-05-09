@@ -11,7 +11,7 @@ bl_info = {
 import os
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, PointerProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, IntProperty, PointerProperty, StringProperty
 from bpy.types import Operator, Panel
 
 
@@ -49,16 +49,48 @@ def _get_reference_camera(context):
     return None
 
 
+def _get_camera_background_image(camera_object):
+    for bg in camera_object.data.background_images:
+        if bg.image:
+            return bg.image
+    return None
+
+
+def _get_image_aspect_ratio(image):
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        return None
+    return width / height
+
+
+def _is_background_portrait(camera_object):
+    bg_image = _get_camera_background_image(camera_object)
+    if not bg_image:
+        return None
+    aspect = _get_image_aspect_ratio(bg_image)
+    if aspect is None:
+        return None
+    return aspect < 1.0
+
+
 def _sync_render_resolution_to_camera(context, camera_object):
     render = context.scene.render
-    camera_data = camera_object.data
+    bg_image = _get_camera_background_image(camera_object)
+    if bg_image:
+        aspect = _get_image_aspect_ratio(bg_image)
+        aspect_label = f"background image '{bg_image.name}'"
+    else:
+        camera_data = camera_object.data
+        sensor_width = camera_data.sensor_width
+        sensor_height = camera_data.sensor_height
+        if sensor_width <= 0 or sensor_height <= 0:
+            return {"ERROR"}, "No background image found and camera sensor size is invalid"
+        aspect = sensor_width / sensor_height
+        aspect_label = "camera sensor"
 
-    sensor_width = camera_data.sensor_width
-    sensor_height = camera_data.sensor_height
-    if sensor_width <= 0 or sensor_height <= 0:
-        return {"ERROR"}, "Camera sensor size is invalid"
+    if not aspect:
+        return {"ERROR"}, "Reference image aspect ratio is invalid"
 
-    aspect = sensor_width / sensor_height
     base_width = max(1, int(render.resolution_x))
     base_height = max(1, int(render.resolution_y))
 
@@ -69,9 +101,36 @@ def _sync_render_resolution_to_camera(context, camera_object):
         render.resolution_y = base_height
         render.resolution_x = max(1, round(base_height * aspect))
 
-    return {"INFO"}, (
-        f"Synced render resolution to camera sensor ratio {sensor_width:.4g}:{sensor_height:.4g}"
-    )
+    return {"INFO"}, f"Synced render resolution to {aspect_label} ratio"
+
+
+def _sync_render_resolution_to_camera_with_long_edge(context, camera_object, long_edge: int):
+    render = context.scene.render
+    camera_data = camera_object.data
+    sensor_width = camera_data.sensor_width
+    sensor_height = camera_data.sensor_height
+    if sensor_width <= 0 or sensor_height <= 0:
+        return {"ERROR"}, "Camera sensor size is invalid"
+
+    sensor_ratio = sensor_width / sensor_height
+    if sensor_ratio <= 0:
+        return {"ERROR"}, "Camera sensor ratio is invalid"
+
+    is_portrait = _is_background_portrait(camera_object)
+    if is_portrait is None:
+        is_portrait = sensor_width < sensor_height
+
+    long_edge = max(1, int(long_edge))
+
+    if is_portrait:
+        render.resolution_y = long_edge
+        render.resolution_x = max(1, round(long_edge / sensor_ratio))
+    else:
+        render.resolution_x = long_edge
+        render.resolution_y = max(1, round(long_edge / sensor_ratio))
+
+    orientation_label = "portrait" if is_portrait else "landscape"
+    return {"INFO"}, f"Synced render resolution to {orientation_label} using long edge {long_edge}"
 
 
 def _resolve_target_collection(context, collection):
@@ -290,7 +349,16 @@ class IMAGECAMERA_OT_sync_render_resolution(Operator):
             self.report({"ERROR"}, "No camera found to sync from")
             return {"CANCELLED"}
 
-        status, message = _sync_render_resolution_to_camera(context, camera_object)
+        scene = context.scene
+        sync_mode = getattr(scene, "image_camera_sync_mode", "BACKGROUND_RATIO")
+        if sync_mode == "LONG_EDGE":
+            status, message = _sync_render_resolution_to_camera_with_long_edge(
+                context,
+                camera_object,
+                scene.image_camera_sync_long_edge,
+            )
+        else:
+            status, message = _sync_render_resolution_to_camera(context, camera_object)
         if status == {"ERROR"}:
             self.report(status, message)
             return {"CANCELLED"}
@@ -310,23 +378,31 @@ class VIEW3D_PT_image_camera(Panel):
         layout = self.layout
         scene = context.scene
 
-        layout.prop(scene, "image_camera_filepath", text="Image")
-        layout.prop(scene, "image_camera_target_collection", text="Collection")
-        layout.prop(scene, "image_camera_mode")
-        layout.prop(scene, "image_camera_frame_method")
-        layout.prop(scene, "image_camera_auto_orientation")
-        layout.prop(scene, "image_camera_copy_position")
-        layout.prop(scene, "image_camera_copy_focal_length")
-        layout.prop(scene, "image_camera_copy_depth_of_field")
-        layout.prop(scene, "image_camera_set_active_camera")
-
-        layout.operator(
+        create_box = layout.box()
+        create_box.label(text="Create Camera")
+        create_box.prop(scene, "image_camera_filepath", text="Image")
+        create_box.prop(scene, "image_camera_target_collection", text="Collection")
+        create_box.prop(scene, "image_camera_mode")
+        create_box.prop(scene, "image_camera_frame_method")
+        create_box.prop(scene, "image_camera_auto_orientation")
+        create_box.prop(scene, "image_camera_copy_position")
+        create_box.prop(scene, "image_camera_copy_focal_length")
+        create_box.prop(scene, "image_camera_copy_depth_of_field")
+        create_box.prop(scene, "image_camera_set_active_camera")
+        create_box.operator(
             IMAGECAMERA_OT_create_from_panel.bl_idname,
             text="Create Camera",
             icon="CAMERA_DATA",
         )
 
-        layout.operator(
+        layout.separator()
+
+        sync_box = layout.box()
+        sync_box.label(text="Sync Render Resolution")
+        sync_box.prop(scene, "image_camera_sync_mode")
+        if scene.image_camera_sync_mode == "LONG_EDGE":
+            sync_box.prop(scene, "image_camera_sync_long_edge")
+        sync_box.operator(
             IMAGECAMERA_OT_sync_render_resolution.bl_idname,
             text="Sync Render Resolution",
             icon="OUTPUT",
@@ -404,6 +480,22 @@ def _register_properties():
         description="Copy the current camera depth of field settings",
         default=False,
     )
+    bpy.types.Scene.image_camera_sync_mode = EnumProperty(
+        name="Sync Mode",
+        description="How render resolution is synchronized to the current camera",
+        items=(
+            ("BACKGROUND_RATIO", "Background Ratio", "Match the attached background image aspect ratio"),
+            ("LONG_EDGE", "Long Edge", "Set the longer output side to a fixed size"),
+        ),
+        default="BACKGROUND_RATIO",
+    )
+    bpy.types.Scene.image_camera_sync_long_edge = IntProperty(
+        name="Long Edge",
+        description="Target size for the longer side of the render resolution",
+        default=3000,
+        min=1,
+        soft_min=1,
+    )
 
 
 def _unregister_properties():
@@ -416,6 +508,8 @@ def _unregister_properties():
     del bpy.types.Scene.image_camera_copy_position
     del bpy.types.Scene.image_camera_copy_focal_length
     del bpy.types.Scene.image_camera_copy_depth_of_field
+    del bpy.types.Scene.image_camera_sync_mode
+    del bpy.types.Scene.image_camera_sync_long_edge
 
 
 def register():

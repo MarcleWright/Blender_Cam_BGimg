@@ -4,6 +4,7 @@ Blender add-on features:
 
 - Open from `File > Import > Image and Create Camera`
 - Open from the 3D View sidebar `N` panel under `Image Camera`
+- The sidebar panel is split into a camera creation section and a separate render sync section
 - Pick an image file
 - Import the image
 - Create a camera with the same base name
@@ -13,7 +14,8 @@ Blender add-on features:
 - Optional toggles to copy the current camera position, focal length, and depth of field
 - Choose the target collection for the new camera
 - Optionally set the new camera as the active scene camera
-- Sync the render output resolution to the current camera sensor ratio
+- Sync the render output resolution to the current background image ratio
+- Optionally sync with a fixed long edge, such as 3000
 
 ## Install
 
@@ -40,4 +42,7 @@ The copy toggles use the current scene camera if available, or the active camera
 
 The `Collection` selector controls where the new camera object is linked in the scene.
 
-`Sync Render Resolution` updates `Render Properties > Dimensions` to match the current camera's sensor aspect ratio.
+`Sync Render Resolution` updates `Render Properties > Dimensions` to match the current camera's attached background image aspect ratio.
+When `Sync Mode` is set to `Long Edge`, the add-on checks whether the attached background image is portrait or landscape.
+The longer render side is set to `Long Edge`, and the shorter side is calculated from the current camera sensor ratio.
+If no background image is attached, it falls back to the camera sensor orientation.
