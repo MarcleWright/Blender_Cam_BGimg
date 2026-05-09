@@ -139,6 +139,39 @@ def _resolve_target_collection(context, collection):
     return context.collection
 
 
+def _iter_cameras_in_collection(collection):
+    for obj in sorted(collection.objects, key=lambda item: item.name.lower()):
+        if obj.type == "CAMERA":
+            yield obj
+
+
+def _camera_output_stem(camera_object):
+    stem = bpy.path.clean_name(camera_object.name)
+    return stem or "Camera"
+
+
+def _output_png_path(output_dir, camera_object):
+    return os.path.join(output_dir, _camera_output_stem(camera_object) + ".png")
+
+
+def _find_output_conflicts(output_dir, cameras):
+    conflicts = []
+    for camera_object in cameras:
+        output_path = _output_png_path(output_dir, camera_object)
+        if os.path.exists(output_path):
+            conflicts.append((camera_object, output_path))
+    return conflicts
+
+
+def _next_available_output_path(output_dir, stem):
+    index = 1
+    while True:
+        candidate = os.path.join(output_dir, f"{stem}_{index:03d}.png")
+        if not os.path.exists(candidate):
+            return candidate
+        index += 1
+
+
 def _create_camera_from_image(
     context,
     filepath: str,
@@ -221,6 +254,83 @@ def _create_camera_from_image(
         context.scene.camera = camera_object
 
     return {"INFO"}, f"Created camera '{camera_name}' with {image_mode.lower()} image '{image.name}'"
+
+
+def _render_camera_collection_to_png(context, collection, output_dir, sync_mode, long_edge, conflict_mode):
+    if collection is None:
+        return {"ERROR"}, "No collection selected"
+
+    output_dir = bpy.path.abspath(output_dir)
+    if not output_dir:
+        return {"ERROR"}, "No output directory selected"
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    scene = context.scene
+    render = scene.render
+    original_camera = scene.camera
+    original_filepath = render.filepath
+    original_format = render.image_settings.file_format
+    original_color_mode = render.image_settings.color_mode
+    original_resolution_x = render.resolution_x
+    original_resolution_y = render.resolution_y
+
+    cameras = list(_iter_cameras_in_collection(collection))
+    if not cameras:
+        return {"ERROR"}, f"No cameras found in collection '{collection.name}'"
+
+    rendered = 0
+    failures = []
+
+    try:
+        render.image_settings.file_format = "PNG"
+        render.image_settings.color_mode = "RGBA"
+
+        for camera_object in cameras:
+            scene.camera = camera_object
+
+            if sync_mode == "LONG_EDGE":
+                status, message = _sync_render_resolution_to_camera_with_long_edge(
+                    context,
+                    camera_object,
+                    long_edge,
+                )
+            else:
+                status, message = _sync_render_resolution_to_camera(context, camera_object)
+
+            if status == {"ERROR"}:
+                failures.append(f"{camera_object.name}: {message}")
+                continue
+
+            output_path = _output_png_path(output_dir, camera_object)
+            if os.path.exists(output_path):
+                if conflict_mode == "SKIP":
+                    continue
+                if conflict_mode == "EXTRA_NAME":
+                    output_path = _next_available_output_path(output_dir, _camera_output_stem(camera_object))
+
+            render.filepath = os.path.splitext(output_path)[0]
+
+            try:
+                bpy.ops.render.render(write_still=True)
+            except Exception as exc:
+                failures.append(f"{camera_object.name}: {exc}")
+                continue
+
+            rendered += 1
+
+    finally:
+        scene.camera = original_camera
+        render.filepath = original_filepath
+        render.image_settings.file_format = original_format
+        render.image_settings.color_mode = original_color_mode
+        render.resolution_x = original_resolution_x
+        render.resolution_y = original_resolution_y
+
+    message = f"Rendered {rendered} camera(s) from collection '{collection.name}'"
+    if failures:
+        message += f"; {len(failures)} failed"
+    return {"INFO" if not failures else "WARNING"}, message
 
 
 class IMPORT_IMAGE_OT_create_camera(Operator):
@@ -367,6 +477,59 @@ class IMAGECAMERA_OT_sync_render_resolution(Operator):
         return {"FINISHED"}
 
 
+class IMAGECAMERA_OT_batch_render_cameras(Operator):
+    bl_idname = "image_camera.batch_render_cameras"
+    bl_label = "Batch Render Cameras"
+    bl_options = {"REGISTER", "UNDO"}
+
+    conflict_mode: EnumProperty(
+        name="Conflict Action",
+        description="How to handle output files that already exist",
+        items=(
+            ("SKIP", "Skip", "Skip cameras whose output file already exists"),
+            ("OVERWRITE", "Overwrite", "Overwrite existing output files"),
+            ("EXTRA_NAME", "Extra Naming", "Save as _001, _002, etc"),
+        ),
+        default="EXTRA_NAME",
+    )
+
+    _conflict_count: IntProperty(options={"HIDDEN"}, default=0)
+
+    def draw(self, context):
+        layout = self.layout
+        if self._conflict_count:
+            layout.label(text=f"{self._conflict_count} output file(s) already exist.")
+        layout.prop(self, "conflict_mode")
+
+    def invoke(self, context, event):
+        scene = context.scene
+        collection = scene.image_camera_batch_collection or scene.image_camera_target_collection
+        cameras = list(_iter_cameras_in_collection(collection)) if collection else []
+        output_dir = bpy.path.abspath(scene.image_camera_batch_output_dir)
+        conflicts = _find_output_conflicts(output_dir, cameras) if output_dir else []
+        self._conflict_count = len(conflicts)
+        if self._conflict_count:
+            return context.window_manager.invoke_props_dialog(self, width=420)
+        return self.execute(context)
+
+    def execute(self, context):
+        scene = context.scene
+        collection = scene.image_camera_batch_collection or scene.image_camera_target_collection
+        status, message = _render_camera_collection_to_png(
+            context,
+            collection,
+            scene.image_camera_batch_output_dir,
+            scene.image_camera_sync_mode,
+            scene.image_camera_sync_long_edge,
+            self.conflict_mode,
+        )
+        if status == {"ERROR"}:
+            self.report(status, message)
+            return {"CANCELLED"}
+        self.report(status, message)
+        return {"FINISHED"}
+
+
 class VIEW3D_PT_image_camera(Panel):
     bl_label = "Image Camera"
     bl_idname = "VIEW3D_PT_image_camera"
@@ -408,6 +571,21 @@ class VIEW3D_PT_image_camera(Panel):
             icon="OUTPUT",
         )
 
+        layout.separator()
+
+        batch_box = layout.box()
+        batch_box.label(text="Batch Render")
+        batch_box.prop(scene, "image_camera_batch_collection", text="Collection")
+        batch_box.prop(scene, "image_camera_batch_output_dir", text="Output")
+        batch_box.prop(scene, "image_camera_sync_mode")
+        if scene.image_camera_sync_mode == "LONG_EDGE":
+            batch_box.prop(scene, "image_camera_sync_long_edge")
+        batch_box.operator(
+            IMAGECAMERA_OT_batch_render_cameras.bl_idname,
+            text="Batch Render PNG",
+            icon="RENDER_STILL",
+        )
+
 
 def menu_func_import(self, context):
     self.layout.operator(
@@ -420,6 +598,7 @@ classes = (
     IMPORT_IMAGE_OT_create_camera,
     IMAGECAMERA_OT_create_from_panel,
     IMAGECAMERA_OT_sync_render_resolution,
+    IMAGECAMERA_OT_batch_render_cameras,
     VIEW3D_PT_image_camera,
 )
 
@@ -435,6 +614,17 @@ def _register_properties():
         name="Collection",
         description="Collection where the new camera will be linked",
         type=bpy.types.Collection,
+    )
+    bpy.types.Scene.image_camera_batch_collection = PointerProperty(
+        name="Batch Collection",
+        description="Collection containing cameras to batch render",
+        type=bpy.types.Collection,
+    )
+    bpy.types.Scene.image_camera_batch_output_dir = StringProperty(
+        name="Output Directory",
+        subtype="DIR_PATH",
+        description="Directory where rendered PNG files will be saved",
+        default="",
     )
     bpy.types.Scene.image_camera_set_active_camera = BoolProperty(
         name="Set Active Camera",
@@ -501,6 +691,8 @@ def _register_properties():
 def _unregister_properties():
     del bpy.types.Scene.image_camera_filepath
     del bpy.types.Scene.image_camera_target_collection
+    del bpy.types.Scene.image_camera_batch_collection
+    del bpy.types.Scene.image_camera_batch_output_dir
     del bpy.types.Scene.image_camera_set_active_camera
     del bpy.types.Scene.image_camera_mode
     del bpy.types.Scene.image_camera_frame_method

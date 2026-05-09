@@ -16,6 +16,7 @@ Blender add-on features:
 - Optionally set the new camera as the active scene camera
 - Sync the render output resolution to the current background image ratio
 - Optionally sync with a fixed long edge, such as 3000
+- Batch render cameras from a selected collection to PNG files
 
 ## Install
 
@@ -46,3 +47,7 @@ The `Collection` selector controls where the new camera object is linked in the 
 When `Sync Mode` is set to `Long Edge`, the add-on checks whether the attached background image is portrait or landscape.
 The longer render side is set to `Long Edge`, and the shorter side is calculated from the current camera sensor ratio.
 If no background image is attached, it falls back to the camera sensor orientation.
+
+`Batch Render` renders every camera in the selected collection and saves each result as a PNG named after the camera.
+The output directory must be set before running it.
+If a PNG with the same name already exists, the add-on prompts for `Skip`, `Overwrite`, or `Extra Naming`.
