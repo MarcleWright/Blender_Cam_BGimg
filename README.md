@@ -4,7 +4,9 @@ Blender add-on features:
 
 - Open from `File > Import > Image and Create Camera`
 - Open from the 3D View sidebar `N` panel under `Image Camera`
-- The sidebar panel is split into a camera creation section and a separate render sync section
+- The sidebar panel uses collapsible sections for Create Camera, Active Camera, Sync Render Resolution, and Batch Render
+- Each section has a secondary collapsible Settings group
+- The sidebar panel includes an active camera section with live focal length editing
 - Pick an image file
 - Import the image
 - Create a camera with the same base name
@@ -16,6 +18,7 @@ Blender add-on features:
 - Optionally set the new camera as the active scene camera
 - Sync the render output resolution to the current background image ratio
 - Optionally sync with a fixed long edge, such as 3000
+- Render only the current active camera
 - Batch render cameras from a selected collection to PNG files
 
 ## Install
@@ -43,6 +46,9 @@ The copy toggles use the current scene camera if available, or the active camera
 
 The `Collection` selector controls where the new camera object is linked in the scene.
 
+The `Active Camera` section edits the current camera data directly, so focal length and other settings update live.
+The `Render Active Camera` button is placed under the Batch Render section and uses the same output directory as batch rendering.
+
 `Sync Render Resolution` updates `Render Properties > Dimensions` to match the current camera's attached background image aspect ratio.
 When `Sync Mode` is set to `Long Edge`, the add-on checks whether the attached background image is portrait or landscape.
 The longer render side is set to `Long Edge`, and the shorter side is calculated from the current camera sensor ratio.
@@ -51,3 +57,5 @@ If no background image is attached, it falls back to the camera sensor orientati
 `Batch Render` renders every camera in the selected collection and saves each result as a PNG named after the camera.
 The output directory must be set before running it.
 If a PNG with the same name already exists, the add-on prompts for `Skip`, `Overwrite`, or `Extra Naming`.
+The batch conflict mode is also available in the Batch Render settings section.
+Both batch render and active camera render use the same output path.

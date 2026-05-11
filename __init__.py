@@ -49,6 +49,13 @@ def _get_reference_camera(context):
     return None
 
 
+def _get_active_camera(context):
+    camera_object = _get_reference_camera(context)
+    if camera_object and camera_object.type == "CAMERA":
+        return camera_object
+    return None
+
+
 def _get_camera_background_image(camera_object):
     for bg in camera_object.data.background_images:
         if bg.image:
@@ -170,6 +177,15 @@ def _next_available_output_path(output_dir, stem):
         if not os.path.exists(candidate):
             return candidate
         index += 1
+
+
+def _draw_collapsible_header(layout, scene, prop_name, label):
+    row = layout.row(align=True)
+    expanded = bool(getattr(scene, prop_name))
+    icon = "TRIA_DOWN" if expanded else "TRIA_RIGHT"
+    row.prop(scene, prop_name, text="", emboss=False, icon=icon)
+    row.label(text=label)
+    return expanded
 
 
 def _create_camera_from_image(
@@ -331,6 +347,40 @@ def _render_camera_collection_to_png(context, collection, output_dir, sync_mode,
     if failures:
         message += f"; {len(failures)} failed"
     return {"INFO" if not failures else "WARNING"}, message
+
+
+def _render_single_camera(context, camera_object, output_dir, sync_mode, long_edge):
+    scene = context.scene
+    output_dir = bpy.path.abspath(output_dir)
+    if not output_dir:
+        return {"ERROR"}, "No output directory selected"
+
+    os.makedirs(output_dir, exist_ok=True)
+    original_camera = scene.camera
+    original_filepath = scene.render.filepath
+
+    try:
+        scene.camera = camera_object
+        if sync_mode == "LONG_EDGE":
+            status, message = _sync_render_resolution_to_camera_with_long_edge(
+                context,
+                camera_object,
+                long_edge,
+            )
+        else:
+            status, message = _sync_render_resolution_to_camera(context, camera_object)
+        if status == {"ERROR"}:
+            return status, message
+
+        scene.render.filepath = os.path.splitext(
+            os.path.join(output_dir, _camera_output_stem(camera_object) + ".png")
+        )[0]
+        bpy.ops.render.render(write_still=True)
+    finally:
+        scene.camera = original_camera
+        scene.render.filepath = original_filepath
+
+    return {"INFO"}, f"Rendered active camera '{camera_object.name}'"
 
 
 class IMPORT_IMAGE_OT_create_camera(Operator):
@@ -508,12 +558,15 @@ class IMAGECAMERA_OT_batch_render_cameras(Operator):
         output_dir = bpy.path.abspath(scene.image_camera_batch_output_dir)
         conflicts = _find_output_conflicts(output_dir, cameras) if output_dir else []
         self._conflict_count = len(conflicts)
+        self.conflict_mode = scene.image_camera_batch_conflict_mode
         if self._conflict_count:
             return context.window_manager.invoke_props_dialog(self, width=420)
         return self.execute(context)
 
     def execute(self, context):
         scene = context.scene
+        if hasattr(self, "conflict_mode"):
+            scene.image_camera_batch_conflict_mode = self.conflict_mode
         collection = scene.image_camera_batch_collection or scene.image_camera_target_collection
         status, message = _render_camera_collection_to_png(
             context,
@@ -530,6 +583,33 @@ class IMAGECAMERA_OT_batch_render_cameras(Operator):
         return {"FINISHED"}
 
 
+class IMAGECAMERA_OT_render_active_camera(Operator):
+    bl_idname = "image_camera.render_active_camera"
+    bl_label = "Render Active Camera"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        camera_object = _get_active_camera(context)
+        if not camera_object:
+            self.report({"ERROR"}, "No active camera found")
+            return {"CANCELLED"}
+
+        scene = context.scene
+        status, message = _render_single_camera(
+            context,
+            camera_object,
+            scene.image_camera_batch_output_dir,
+            scene.image_camera_sync_mode,
+            scene.image_camera_sync_long_edge,
+        )
+        if status == {"ERROR"}:
+            self.report(status, message)
+            return {"CANCELLED"}
+
+        self.report(status, message)
+        return {"FINISHED"}
+
+
 class VIEW3D_PT_image_camera(Panel):
     bl_label = "Image Camera"
     bl_idname = "VIEW3D_PT_image_camera"
@@ -541,50 +621,84 @@ class VIEW3D_PT_image_camera(Panel):
         layout = self.layout
         scene = context.scene
 
-        create_box = layout.box()
-        create_box.label(text="Create Camera")
-        create_box.prop(scene, "image_camera_filepath", text="Image")
-        create_box.prop(scene, "image_camera_target_collection", text="Collection")
-        create_box.prop(scene, "image_camera_mode")
-        create_box.prop(scene, "image_camera_frame_method")
-        create_box.prop(scene, "image_camera_auto_orientation")
-        create_box.prop(scene, "image_camera_copy_position")
-        create_box.prop(scene, "image_camera_copy_focal_length")
-        create_box.prop(scene, "image_camera_copy_depth_of_field")
-        create_box.prop(scene, "image_camera_set_active_camera")
-        create_box.operator(
-            IMAGECAMERA_OT_create_from_panel.bl_idname,
-            text="Create Camera",
-            icon="CAMERA_DATA",
-        )
+        if _draw_collapsible_header(layout, scene, "image_camera_show_create", "Create Camera"):
+            create_box = layout.box()
+            create_box.prop(scene, "image_camera_filepath", text="Image")
+            if _draw_collapsible_header(create_box, scene, "image_camera_show_create_settings", "Settings"):
+                settings_box = create_box.box()
+                settings_box.prop(scene, "image_camera_target_collection", text="Collection")
+                settings_box.prop(scene, "image_camera_mode")
+                settings_box.prop(scene, "image_camera_frame_method")
+                settings_box.prop(scene, "image_camera_auto_orientation")
+                settings_box.prop(scene, "image_camera_copy_position")
+                settings_box.prop(scene, "image_camera_copy_focal_length")
+                settings_box.prop(scene, "image_camera_copy_depth_of_field")
+                settings_box.prop(scene, "image_camera_set_active_camera")
+            create_box.operator(
+                IMAGECAMERA_OT_create_from_panel.bl_idname,
+                text="Create Camera",
+                icon="CAMERA_DATA",
+            )
 
         layout.separator()
 
-        sync_box = layout.box()
-        sync_box.label(text="Sync Render Resolution")
-        sync_box.prop(scene, "image_camera_sync_mode")
-        if scene.image_camera_sync_mode == "LONG_EDGE":
-            sync_box.prop(scene, "image_camera_sync_long_edge")
-        sync_box.operator(
-            IMAGECAMERA_OT_sync_render_resolution.bl_idname,
-            text="Sync Render Resolution",
-            icon="OUTPUT",
-        )
+        if _draw_collapsible_header(layout, scene, "image_camera_show_active", "Active Camera"):
+            active_box = layout.box()
+            camera_object = _get_active_camera(context)
+            if camera_object:
+                active_box.prop(camera_object.data, "lens", text="Focal Length")
+                if _draw_collapsible_header(active_box, scene, "image_camera_show_active_settings", "Settings"):
+                    settings_box = active_box.box()
+                    settings_box.prop(camera_object.data, "sensor_fit", text="Sensor Fit")
+                    settings_box.prop(camera_object.data, "sensor_width", text="Sensor Width")
+                    settings_box.prop(camera_object.data, "sensor_height", text="Sensor Height")
+                    settings_box.prop(camera_object.data.dof, "use_dof", text="Depth of Field")
+                    settings_box.prop(camera_object.data.dof, "focus_distance", text="Focus Distance")
+                    settings_box.prop(camera_object.data.dof, "aperture_fstop", text="F-Stop")
+            else:
+                active_box.label(text="No active camera selected")
 
         layout.separator()
 
-        batch_box = layout.box()
-        batch_box.label(text="Batch Render")
-        batch_box.prop(scene, "image_camera_batch_collection", text="Collection")
-        batch_box.prop(scene, "image_camera_batch_output_dir", text="Output")
-        batch_box.prop(scene, "image_camera_sync_mode")
-        if scene.image_camera_sync_mode == "LONG_EDGE":
-            batch_box.prop(scene, "image_camera_sync_long_edge")
-        batch_box.operator(
-            IMAGECAMERA_OT_batch_render_cameras.bl_idname,
-            text="Batch Render PNG",
-            icon="RENDER_STILL",
-        )
+        if _draw_collapsible_header(layout, scene, "image_camera_show_sync", "Sync Render Resolution"):
+            sync_box = layout.box()
+            if _draw_collapsible_header(sync_box, scene, "image_camera_show_sync_settings", "Settings"):
+                settings_box = sync_box.box()
+                settings_box.prop(scene, "image_camera_sync_mode")
+                if scene.image_camera_sync_mode == "LONG_EDGE":
+                    settings_box.prop(scene, "image_camera_sync_long_edge")
+            sync_box.operator(
+                IMAGECAMERA_OT_sync_render_resolution.bl_idname,
+                text="Sync Render Resolution",
+                icon="OUTPUT",
+            )
+
+        layout.separator()
+
+        if _draw_collapsible_header(layout, scene, "image_camera_show_batch", "Batch Render"):
+            batch_box = layout.box()
+            if _draw_collapsible_header(batch_box, scene, "image_camera_show_batch_settings", "Settings"):
+                settings_box = batch_box.box()
+                settings_box.prop(scene, "image_camera_batch_collection", text="Collection")
+                settings_box.prop(scene, "image_camera_batch_output_dir", text="Output")
+                settings_box.prop(scene, "image_camera_sync_mode")
+                if scene.image_camera_sync_mode == "LONG_EDGE":
+                    settings_box.prop(scene, "image_camera_sync_long_edge")
+                settings_box.prop(scene, "image_camera_batch_conflict_mode")
+            row = batch_box.row()
+            row.enabled = bool(scene.image_camera_batch_output_dir)
+            row.operator(
+                IMAGECAMERA_OT_batch_render_cameras.bl_idname,
+                text="Batch Render PNG",
+                icon="RENDER_STILL",
+            )
+            row = batch_box.row()
+            row.enabled = bool(scene.image_camera_batch_output_dir)
+            row.operator(
+                IMAGECAMERA_OT_render_active_camera.bl_idname,
+                text="Render Active Camera",
+                icon="RENDER_STILL",
+            )
 
 
 def menu_func_import(self, context):
@@ -597,6 +711,7 @@ def menu_func_import(self, context):
 classes = (
     IMPORT_IMAGE_OT_create_camera,
     IMAGECAMERA_OT_create_from_panel,
+    IMAGECAMERA_OT_render_active_camera,
     IMAGECAMERA_OT_sync_render_resolution,
     IMAGECAMERA_OT_batch_render_cameras,
     VIEW3D_PT_image_camera,
@@ -609,6 +724,38 @@ def _register_properties():
         subtype="FILE_PATH",
         description="Image file used to create the camera",
         default="",
+    )
+    bpy.types.Scene.image_camera_show_create = BoolProperty(
+        name="Show Create Camera",
+        default=True,
+    )
+    bpy.types.Scene.image_camera_show_create_settings = BoolProperty(
+        name="Show Create Camera Settings",
+        default=True,
+    )
+    bpy.types.Scene.image_camera_show_active = BoolProperty(
+        name="Show Active Camera",
+        default=True,
+    )
+    bpy.types.Scene.image_camera_show_active_settings = BoolProperty(
+        name="Show Active Camera Settings",
+        default=True,
+    )
+    bpy.types.Scene.image_camera_show_sync = BoolProperty(
+        name="Show Sync Render Resolution",
+        default=True,
+    )
+    bpy.types.Scene.image_camera_show_sync_settings = BoolProperty(
+        name="Show Sync Render Resolution Settings",
+        default=True,
+    )
+    bpy.types.Scene.image_camera_show_batch = BoolProperty(
+        name="Show Batch Render",
+        default=True,
+    )
+    bpy.types.Scene.image_camera_show_batch_settings = BoolProperty(
+        name="Show Batch Render Settings",
+        default=True,
     )
     bpy.types.Scene.image_camera_target_collection = PointerProperty(
         name="Collection",
@@ -625,6 +772,16 @@ def _register_properties():
         subtype="DIR_PATH",
         description="Directory where rendered PNG files will be saved",
         default="",
+    )
+    bpy.types.Scene.image_camera_batch_conflict_mode = EnumProperty(
+        name="Conflict Action",
+        description="How to handle output files that already exist",
+        items=(
+            ("SKIP", "Skip", "Skip cameras whose output file already exists"),
+            ("OVERWRITE", "Overwrite", "Overwrite existing output files"),
+            ("EXTRA_NAME", "Extra Naming", "Save as _001, _002, etc"),
+        ),
+        default="EXTRA_NAME",
     )
     bpy.types.Scene.image_camera_set_active_camera = BoolProperty(
         name="Set Active Camera",
@@ -690,9 +847,18 @@ def _register_properties():
 
 def _unregister_properties():
     del bpy.types.Scene.image_camera_filepath
+    del bpy.types.Scene.image_camera_show_create
+    del bpy.types.Scene.image_camera_show_create_settings
+    del bpy.types.Scene.image_camera_show_active
+    del bpy.types.Scene.image_camera_show_active_settings
+    del bpy.types.Scene.image_camera_show_sync
+    del bpy.types.Scene.image_camera_show_sync_settings
+    del bpy.types.Scene.image_camera_show_batch
+    del bpy.types.Scene.image_camera_show_batch_settings
     del bpy.types.Scene.image_camera_target_collection
     del bpy.types.Scene.image_camera_batch_collection
     del bpy.types.Scene.image_camera_batch_output_dir
+    del bpy.types.Scene.image_camera_batch_conflict_mode
     del bpy.types.Scene.image_camera_set_active_camera
     del bpy.types.Scene.image_camera_mode
     del bpy.types.Scene.image_camera_frame_method
