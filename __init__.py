@@ -647,6 +647,10 @@ class VIEW3D_PT_image_camera(Panel):
             camera_object = _get_active_camera(context)
             if camera_object:
                 active_box.prop(camera_object.data, "lens", text="Focal Length")
+                if _draw_collapsible_header(active_box, scene, "image_camera_show_active_position", "Position"):
+                    position_box = active_box.box()
+                    position_box.prop(camera_object, "location")
+                    position_box.prop(camera_object, "rotation_euler")
                 if _draw_collapsible_header(active_box, scene, "image_camera_show_active_settings", "Settings"):
                     settings_box = active_box.box()
                     settings_box.prop(camera_object.data, "sensor_fit", text="Sensor Fit")
@@ -735,6 +739,10 @@ def _register_properties():
     )
     bpy.types.Scene.image_camera_show_active = BoolProperty(
         name="Show Active Camera",
+        default=True,
+    )
+    bpy.types.Scene.image_camera_show_active_position = BoolProperty(
+        name="Show Active Camera Position",
         default=True,
     )
     bpy.types.Scene.image_camera_show_active_settings = BoolProperty(
@@ -850,6 +858,7 @@ def _unregister_properties():
     del bpy.types.Scene.image_camera_show_create
     del bpy.types.Scene.image_camera_show_create_settings
     del bpy.types.Scene.image_camera_show_active
+    del bpy.types.Scene.image_camera_show_active_position
     del bpy.types.Scene.image_camera_show_active_settings
     del bpy.types.Scene.image_camera_show_sync
     del bpy.types.Scene.image_camera_show_sync_settings

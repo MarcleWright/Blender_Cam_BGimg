@@ -6,7 +6,7 @@ Blender add-on features:
 - Open from the 3D View sidebar `N` panel under `Image Camera`
 - The sidebar panel uses collapsible sections for Create Camera, Active Camera, Sync Render Resolution, and Batch Render
 - Each section has a secondary collapsible Settings group
-- The sidebar panel includes an active camera section with live focal length editing
+- The sidebar panel includes an active camera section with live focal length editing and a Position submenu
 - Pick an image file
 - Import the image
 - Create a camera with the same base name
@@ -47,6 +47,7 @@ The copy toggles use the current scene camera if available, or the active camera
 The `Collection` selector controls where the new camera object is linked in the scene.
 
 The `Active Camera` section edits the current camera data directly, so focal length and other settings update live.
+The `Position` submenu edits camera `location` and `rotation` directly.
 The `Render Active Camera` button is placed under the Batch Render section and uses the same output directory as batch rendering.
 
 `Sync Render Resolution` updates `Render Properties > Dimensions` to match the current camera's attached background image aspect ratio.
