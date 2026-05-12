@@ -11,7 +11,7 @@ bl_info = {
 import os
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, IntProperty, PointerProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 from bpy.types import Operator, Panel
 
 
@@ -56,11 +56,101 @@ def _get_active_camera(context):
     return None
 
 
+def _apply_camera_to_view(context, enabled: bool):
+    window_manager = context.window_manager
+    for window in window_manager.windows:
+        screen = window.screen
+        for area in screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            for space in area.spaces:
+                if space.type != "VIEW_3D":
+                    continue
+                space.lock_camera = enabled
+                if enabled and space.region_3d:
+                    space.region_3d.view_perspective = "CAMERA"
+
+
+def _update_camera_to_view(self, context):
+    if context is None:
+        return
+    _apply_camera_to_view(context, bool(self.image_camera_camera_to_view))
+
+
 def _get_camera_background_image(camera_object):
     for bg in camera_object.data.background_images:
         if bg.image:
             return bg.image
     return None
+
+
+def _get_active_camera_background_slot(camera_object):
+    background_images = camera_object.data.background_images
+    if len(background_images) == 0:
+        return None
+
+    for bg in background_images:
+        if bg.image and bg.show_background_image:
+            return bg
+
+    for bg in background_images:
+        if bg.image:
+            return bg
+
+    return background_images[0]
+
+
+def _get_scene_active_camera_background_slot(scene):
+    if scene is None:
+        return None
+
+    camera_object = _get_active_camera(bpy.context)
+    if not camera_object:
+        return None
+
+    return _get_active_camera_background_slot(camera_object)
+
+
+def _get_scene_active_camera_bg_opacity(self):
+    bg_slot = _get_scene_active_camera_background_slot(self)
+    if not bg_slot:
+        return 0.0
+    return float(bg_slot.alpha)
+
+
+def _set_scene_active_camera_bg_opacity(self, value):
+    bg_slot = _get_scene_active_camera_background_slot(self)
+    if not bg_slot:
+        return
+    bg_slot.alpha = value
+
+
+def _get_scene_active_camera_passepartout(self):
+    camera_object = _get_active_camera(bpy.context)
+    if not camera_object:
+        return False
+    return bool(camera_object.data.show_passepartout)
+
+
+def _set_scene_active_camera_passepartout(self, value):
+    camera_object = _get_active_camera(bpy.context)
+    if not camera_object:
+        return
+    camera_object.data.show_passepartout = bool(value)
+
+
+def _get_scene_active_camera_passepartout_alpha(self):
+    camera_object = _get_active_camera(bpy.context)
+    if not camera_object:
+        return 0.0
+    return float(camera_object.data.passepartout_alpha)
+
+
+def _set_scene_active_camera_passepartout_alpha(self, value):
+    camera_object = _get_active_camera(bpy.context)
+    if not camera_object:
+        return
+    camera_object.data.passepartout_alpha = value
 
 
 def _get_image_aspect_ratio(image):
@@ -170,6 +260,34 @@ def _find_output_conflicts(output_dir, cameras):
     return conflicts
 
 
+def _list_unused_cameras_and_images():
+    cameras = [camera for camera in bpy.data.cameras if camera.users == 0 and camera.library is None]
+    images = [image for image in bpy.data.images if image.users == 0 and image.library is None]
+    cameras.sort(key=lambda item: item.name.lower())
+    images.sort(key=lambda item: item.name.lower())
+    return cameras, images
+
+
+def _purge_unused_cameras_and_images():
+    removed_camera_names = []
+    removed_image_names = []
+
+    while True:
+        cameras, images = _list_unused_cameras_and_images()
+        if not cameras and not images:
+            break
+
+        for camera_data in cameras:
+            removed_camera_names.append(camera_data.name)
+            bpy.data.cameras.remove(camera_data)
+
+        for image in images:
+            removed_image_names.append(image.name)
+            bpy.data.images.remove(image)
+
+    return removed_camera_names, removed_image_names
+
+
 def _next_available_output_path(output_dir, stem):
     index = 1
     while True:
@@ -268,6 +386,11 @@ def _create_camera_from_image(
     if set_active_camera:
         context.view_layer.objects.active = camera_object
         context.scene.camera = camera_object
+        scene = context.scene
+        if hasattr(scene, "image_camera_camera_to_view"):
+            scene.image_camera_camera_to_view = True
+        else:
+            _apply_camera_to_view(context, True)
 
     return {"INFO"}, f"Created camera '{camera_name}' with {image_mode.lower()} image '{image.name}'"
 
@@ -349,7 +472,7 @@ def _render_camera_collection_to_png(context, collection, output_dir, sync_mode,
     return {"INFO" if not failures else "WARNING"}, message
 
 
-def _render_single_camera(context, camera_object, output_dir, sync_mode, long_edge):
+def _render_single_camera(context, camera_object, output_dir, sync_mode, long_edge, conflict_mode):
     scene = context.scene
     output_dir = bpy.path.abspath(output_dir)
     if not output_dir:
@@ -358,9 +481,12 @@ def _render_single_camera(context, camera_object, output_dir, sync_mode, long_ed
     os.makedirs(output_dir, exist_ok=True)
     original_camera = scene.camera
     original_filepath = scene.render.filepath
+    original_camera_to_view = bool(getattr(scene, "image_camera_camera_to_view", False))
 
     try:
         scene.camera = camera_object
+        if original_camera_to_view:
+            _apply_camera_to_view(context, True)
         if sync_mode == "LONG_EDGE":
             status, message = _sync_render_resolution_to_camera_with_long_edge(
                 context,
@@ -372,20 +498,27 @@ def _render_single_camera(context, camera_object, output_dir, sync_mode, long_ed
         if status == {"ERROR"}:
             return status, message
 
-        scene.render.filepath = os.path.splitext(
-            os.path.join(output_dir, _camera_output_stem(camera_object) + ".png")
-        )[0]
+        output_path = _output_png_path(output_dir, camera_object)
+        if os.path.exists(output_path):
+            if conflict_mode == "SKIP":
+                return {"INFO"}, f"Skipped active camera '{camera_object.name}' because output already exists"
+            if conflict_mode == "EXTRA_NAME":
+                output_path = _next_available_output_path(output_dir, _camera_output_stem(camera_object))
+
+        scene.render.filepath = os.path.splitext(output_path)[0]
         bpy.ops.render.render(write_still=True)
     finally:
         scene.camera = original_camera
         scene.render.filepath = original_filepath
+        if original_camera_to_view:
+            scene.image_camera_camera_to_view = False
 
     return {"INFO"}, f"Rendered active camera '{camera_object.name}'"
 
 
 class IMPORT_IMAGE_OT_create_camera(Operator):
     bl_idname = "import_image.create_camera"
-    bl_label = "Image and Create Camera"
+    bl_label = "Accept and Create"
     bl_options = {"REGISTER", "UNDO"}
 
     filepath: StringProperty(subtype="FILE_PATH")
@@ -601,12 +734,68 @@ class IMAGECAMERA_OT_render_active_camera(Operator):
             scene.image_camera_batch_output_dir,
             scene.image_camera_sync_mode,
             scene.image_camera_sync_long_edge,
+            scene.image_camera_batch_conflict_mode,
         )
         if status == {"ERROR"}:
             self.report(status, message)
             return {"CANCELLED"}
 
         self.report(status, message)
+        return {"FINISHED"}
+
+
+class IMAGECAMERA_OT_purge_unused_datablocks(Operator):
+    bl_idname = "image_camera.purge_unused_datablocks"
+    bl_label = "Purge Unused Data"
+    bl_options = {"REGISTER", "UNDO"}
+
+    camera_names: StringProperty(options={"HIDDEN"}, default="")
+    image_names: StringProperty(options={"HIDDEN"}, default="")
+    camera_count: IntProperty(options={"HIDDEN"}, default=0)
+    image_count: IntProperty(options={"HIDDEN"}, default=0)
+
+    def draw(self, context):
+        layout = self.layout
+
+        layout.label(text=f"Unused Cameras: {self.camera_count}")
+        if self.camera_names:
+            box = layout.box()
+            for name in self.camera_names.split("\n"):
+                if name:
+                    box.label(text=name)
+        else:
+            layout.label(text="No unused cameras found")
+
+        layout.separator()
+
+        layout.label(text=f"Unused Images: {self.image_count}")
+        if self.image_names:
+            box = layout.box()
+            for name in self.image_names.split("\n"):
+                if name:
+                    box.label(text=name)
+        else:
+            layout.label(text="No unused images found")
+
+    def invoke(self, context, event):
+        cameras, images = _list_unused_cameras_and_images()
+        self.camera_count = len(cameras)
+        self.image_count = len(images)
+        self.camera_names = "\n".join(camera.name for camera in cameras)
+        self.image_names = "\n".join(image.name for image in images)
+
+        if self.camera_count == 0 and self.image_count == 0:
+            self.report({"INFO"}, "No unused camera or image datablocks found")
+            return {"CANCELLED"}
+
+        return context.window_manager.invoke_props_dialog(self, width=500)
+
+    def execute(self, context):
+        removed_cameras, removed_images = _purge_unused_cameras_and_images()
+        self.report(
+            {"INFO"},
+            f"Removed {len(removed_cameras)} camera(s) and {len(removed_images)} image(s)",
+        )
         return {"FINISHED"}
 
 
@@ -647,6 +836,16 @@ class VIEW3D_PT_image_camera(Panel):
             camera_object = _get_active_camera(context)
             if camera_object:
                 active_box.prop(camera_object.data, "lens", text="Focal Length")
+                active_box.prop(scene, "image_camera_camera_to_view")
+                bg_row = active_box.row()
+                bg_row.enabled = _get_active_camera_background_slot(camera_object) is not None
+                bg_row.prop(scene, "image_camera_bg_opacity", text="BG Opacity")
+                pass_row = active_box.row(align=True)
+                pass_row.enabled = True
+                pass_row.prop(scene, "image_camera_passepartout", text="Passepartout")
+                alpha_row = active_box.row()
+                alpha_row.enabled = bool(scene.image_camera_passepartout)
+                alpha_row.prop(scene, "image_camera_passepartout_alpha", text="Alpha")
                 if _draw_collapsible_header(active_box, scene, "image_camera_show_active_position", "Position"):
                     position_box = active_box.box()
                     position_box.prop(camera_object, "location")
@@ -704,6 +903,16 @@ class VIEW3D_PT_image_camera(Panel):
                 icon="RENDER_STILL",
             )
 
+        layout.separator()
+
+        if _draw_collapsible_header(layout, scene, "image_camera_show_delete", "Delete"):
+            delete_box = layout.box()
+            delete_box.operator(
+                IMAGECAMERA_OT_purge_unused_datablocks.bl_idname,
+                text="Purge Unused Data",
+                icon="TRASH",
+            )
+
 
 def menu_func_import(self, context):
     self.layout.operator(
@@ -716,6 +925,7 @@ classes = (
     IMPORT_IMAGE_OT_create_camera,
     IMAGECAMERA_OT_create_from_panel,
     IMAGECAMERA_OT_render_active_camera,
+    IMAGECAMERA_OT_purge_unused_datablocks,
     IMAGECAMERA_OT_sync_render_resolution,
     IMAGECAMERA_OT_batch_render_cameras,
     VIEW3D_PT_image_camera,
@@ -741,6 +951,37 @@ def _register_properties():
         name="Show Active Camera",
         default=True,
     )
+    bpy.types.Scene.image_camera_camera_to_view = BoolProperty(
+        name="Camera to View",
+        description="Lock the current 3D View to the active camera",
+        default=True,
+        update=_update_camera_to_view,
+    )
+    bpy.types.Scene.image_camera_bg_opacity = FloatProperty(
+        name="BG Opacity",
+        description="Opacity of the active camera reference image",
+        subtype="FACTOR",
+        min=0.0,
+        max=1.0,
+        get=_get_scene_active_camera_bg_opacity,
+        set=_set_scene_active_camera_bg_opacity,
+    )
+    bpy.types.Scene.image_camera_passepartout = BoolProperty(
+        name="Passepartout",
+        description="Darken the view outside the active camera frame",
+        default=False,
+        get=_get_scene_active_camera_passepartout,
+        set=_set_scene_active_camera_passepartout,
+    )
+    bpy.types.Scene.image_camera_passepartout_alpha = FloatProperty(
+        name="Alpha",
+        description="Opacity of the camera frame overlay",
+        subtype="FACTOR",
+        min=0.0,
+        max=1.0,
+        get=_get_scene_active_camera_passepartout_alpha,
+        set=_set_scene_active_camera_passepartout_alpha,
+    )
     bpy.types.Scene.image_camera_show_active_position = BoolProperty(
         name="Show Active Camera Position",
         default=True,
@@ -763,6 +1004,10 @@ def _register_properties():
     )
     bpy.types.Scene.image_camera_show_batch_settings = BoolProperty(
         name="Show Batch Render Settings",
+        default=True,
+    )
+    bpy.types.Scene.image_camera_show_delete = BoolProperty(
+        name="Show Delete",
         default=True,
     )
     bpy.types.Scene.image_camera_target_collection = PointerProperty(
@@ -858,12 +1103,17 @@ def _unregister_properties():
     del bpy.types.Scene.image_camera_show_create
     del bpy.types.Scene.image_camera_show_create_settings
     del bpy.types.Scene.image_camera_show_active
+    del bpy.types.Scene.image_camera_camera_to_view
+    del bpy.types.Scene.image_camera_bg_opacity
+    del bpy.types.Scene.image_camera_passepartout
+    del bpy.types.Scene.image_camera_passepartout_alpha
     del bpy.types.Scene.image_camera_show_active_position
     del bpy.types.Scene.image_camera_show_active_settings
     del bpy.types.Scene.image_camera_show_sync
     del bpy.types.Scene.image_camera_show_sync_settings
     del bpy.types.Scene.image_camera_show_batch
     del bpy.types.Scene.image_camera_show_batch_settings
+    del bpy.types.Scene.image_camera_show_delete
     del bpy.types.Scene.image_camera_target_collection
     del bpy.types.Scene.image_camera_batch_collection
     del bpy.types.Scene.image_camera_batch_output_dir
